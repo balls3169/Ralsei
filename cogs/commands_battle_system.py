@@ -1,17 +1,24 @@
 """
 !battle — the core battle engine.
 
-Flow: !battle <enemy> starts a fight -> character select (Kris/Susie/Ralsei)
--> that character's action set -> resolve -> regenerate image -> repeat.
+Flow (per planning, redesigned to match real Deltarune more closely):
+  1. !battle <enemy> starts a fight.
+  2. Pick an action for EACH of Kris, Susie, and Ralsei (queued, not resolved
+     immediately) — mirrors choosing the whole party's moves before the
+     turn plays out.
+  3. Once all three are chosen, hit "Confirm Turn" — all three actions
+     resolve in order (Kris, Susie, Ralsei).
+  4. If the fight isn't over, the enemy telegraphs an attack and you must
+     pick the safe dodge option within a short time limit. Real bullet-hell
+     movement isn't possible over Discord, so this is the turn-based
+     equivalent: react to the telegraph, guess/remember the right lane,
+     beat the clock. Wrong pick or timeout = you get hit.
+  5. Loop back to step 2 for the next turn.
 
-Shared TP pool across the party (per planning). Per-enemy ACT menus come
-from data/enemies.py, not a universal list. SPARE only works once mercy
-hits the enemy's threshold; TIRED enemies can only be resolved by Ralsei's
-Pacify. X-Flirt follows the canon fail/fail/succeed structure where defined.
-
-This is a working skeleton, not the full 700-enemy roster — add more
-enemies in data/enemies.py following the existing shape and everything
-here will "just work" for them too.
+Shared TP pool across the party (per planning). Per-enemy ACT menus and
+attack patterns come from data/lore_enemies_and_acts.py — add more enemies
+there following the existing shape and everything here will "just work"
+for them too.
 """
 
 import random
@@ -29,6 +36,20 @@ STARTING_PARTY = {
     "ralsei": {"hp": 80, "max_hp": 80},
 }
 
+CHARACTERS = ["kris", "susie", "ralsei"]
+
+# Generic fallback attack pattern for any enemy that doesn't define its own
+# attack_patterns list — keeps the dodge system from crashing on new enemies
+# you add later before you've written custom patterns for them.
+DEFAULT_ATTACK_PATTERNS = [
+    {
+        "name": "Lunge",
+        "telegraph": "The enemy lunges forward, aiming for one side!",
+        "options": ["left", "right"],
+        "damage": 12,
+    }
+]
+
 
 def new_battle_state(enemy_key: str) -> dict:
     enemy = ENEMIES[enemy_key]
@@ -45,44 +66,59 @@ def new_battle_state(enemy_key: str) -> dict:
         "party": {k: dict(v) for k, v in STARTING_PARTY.items()},
         "log_line": random.choice(enemy["encounter_lines"]),
         "flirt_used": {"susie": False, "ralsei": False},
+        "pending_actions": {"kris": None, "susie": None, "ralsei": None},
         "over": False,
         "won": False,
     }
 
 
-async def send_battle_image(channel: discord.abc.Messageable, state: dict, view: discord.ui.View | None = None):
-    buf = render_battle(state)
-    file = discord.File(buf, filename="battle.png")
-    return await channel.send(file=file, view=view) if view else await channel.send(file=file)
+def _describe_pending(pending):
+    if not pending:
+        return "choose action"
+    if pending["action"] == "act":
+        return f"ACT: {pending['act_name']}"
+    return pending["action"].upper()
 
 
-# --- UI Views ---
+def turn_plan_text(state: dict) -> str:
+    lines = [state.get("log_line", "")]
+    lines.append("")
+    lines.append("Choose an action for each party member, then Confirm Turn:")
+    for char in CHARACTERS:
+        lines.append(f"  {char.capitalize()}: {_describe_pending(state['pending_actions'].get(char))}")
+    return "\n".join(lines)
 
-class CharacterSelectView(discord.ui.View):
-    def __init__(self, channel_id: int):
-        super().__init__(timeout=120)
+
+# --- Turn planning UI (character select -> per-character action -> back to plan) ---
+
+class TurnPlanView(discord.ui.View):
+    def __init__(self, channel_id: int, pending_actions: dict):
+        super().__init__(timeout=180)
         self.channel_id = channel_id
 
-    @discord.ui.button(label="Kris", style=discord.ButtonStyle.primary)
-    async def kris(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._pick(interaction, "kris")
+        styles = {"kris": discord.ButtonStyle.primary, "susie": discord.ButtonStyle.danger, "ralsei": discord.ButtonStyle.success}
+        for char in CHARACTERS:
+            label = f"{char.capitalize()}: {_describe_pending(pending_actions.get(char))}"
+            self.add_item(CharacterPickButton(channel_id, char, label, styles[char]))
 
-    @discord.ui.button(label="Susie", style=discord.ButtonStyle.danger)
-    async def susie(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._pick(interaction, "susie")
+        if all(pending_actions.get(c) for c in CHARACTERS):
+            self.add_item(ConfirmTurnButton(channel_id))
 
-    @discord.ui.button(label="Ralsei", style=discord.ButtonStyle.success)
-    async def ralsei(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._pick(interaction, "ralsei")
 
-    async def _pick(self, interaction: discord.Interaction, character: str):
+class CharacterPickButton(discord.ui.Button):
+    def __init__(self, channel_id, character, label, style):
+        super().__init__(label=label, style=style, row=CHARACTERS.index(character))
+        self.channel_id = channel_id
+        self.character = character
+
+    async def callback(self, interaction: discord.Interaction):
         state = await storage.get_battle(self.channel_id)
         if not state or state.get("over"):
             await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
             return
-        view = ActionSelectView(self.channel_id, character)
+        view = ActionSelectView(self.channel_id, self.character)
         await interaction.response.edit_message(
-            content=f"**{character.capitalize()}** is up. What do you want to do?",
+            content=f"What should **{self.character.capitalize()}** do this turn?",
             view=view,
         )
 
@@ -105,6 +141,7 @@ class ActionSelectView(discord.ui.View):
 
         self.add_item(ActionButton("ITEM", discord.ButtonStyle.secondary, channel_id, character, "item"))
         self.add_item(ActionButton("DEFEND", discord.ButtonStyle.secondary, channel_id, character, "defend"))
+        self.add_item(BackButton(channel_id))
 
 
 class ActionButton(discord.ui.Button):
@@ -123,25 +160,14 @@ class ActionButton(discord.ui.Button):
         if self.action == "act" and self.character == "kris":
             enemy = ENEMIES[state["enemy_key"]]
             view = ActMenuView(self.channel_id, enemy["acts"])
-            await interaction.response.edit_message(content="Choose an ACT:", view=view)
+            await interaction.response.edit_message(content="Choose an ACT for Kris:", view=view)
             return
 
-        guild_id = interaction.guild_id
-        result_text = await resolve_action(state, self.character, self.action, guild_id=guild_id)
-        if not state["over"]:
-            result_text += apply_enemy_turn(state)
+        state["pending_actions"][self.character] = {"action": self.action}
         await storage.set_battle(self.channel_id, state)
 
-        if state["over"]:
-            view = None
-            if not state["won"]:
-                view = RetryView(self.channel_id)
-        else:
-            view = CharacterSelectView(self.channel_id)
-
-        buf = render_battle(state)
-        file = discord.File(buf, filename="battle.png")
-        await interaction.response.edit_message(content=result_text, attachments=[file], view=view)
+        view = TurnPlanView(self.channel_id, state["pending_actions"])
+        await interaction.response.edit_message(content=turn_plan_text(state), view=view)
 
 
 class ActMenuView(discord.ui.View):
@@ -149,6 +175,7 @@ class ActMenuView(discord.ui.View):
         super().__init__(timeout=120)
         for act in acts:
             self.add_item(ActButton(channel_id, act))
+        self.add_item(BackButton(channel_id))
 
 
 class ActButton(discord.ui.Button):
@@ -163,18 +190,25 @@ class ActButton(discord.ui.Button):
             await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
             return
 
-        result_text = await resolve_act(state, "kris", self.act)
-        if not state["over"]:
-            result_text += apply_enemy_turn(state)
+        state["pending_actions"]["kris"] = {"action": "act", "act_name": self.act["name"]}
         await storage.set_battle(self.channel_id, state)
 
-        view = None if state["over"] else CharacterSelectView(self.channel_id)
-        if state["over"] and not state["won"]:
-            view = RetryView(self.channel_id)
+        view = TurnPlanView(self.channel_id, state["pending_actions"])
+        await interaction.response.edit_message(content=turn_plan_text(state), view=view)
 
-        buf = render_battle(state)
-        file = discord.File(buf, filename="battle.png")
-        await interaction.response.edit_message(content=result_text, attachments=[file], view=view)
+
+class BackButton(discord.ui.Button):
+    def __init__(self, channel_id):
+        super().__init__(label="Back", style=discord.ButtonStyle.secondary, row=4)
+        self.channel_id = channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        state = await storage.get_battle(self.channel_id)
+        if not state or state.get("over"):
+            await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
+            return
+        view = TurnPlanView(self.channel_id, state["pending_actions"])
+        await interaction.response.edit_message(content=turn_plan_text(state), view=view)
 
 
 class RetryView(discord.ui.View):
@@ -197,10 +231,154 @@ class RetryView(discord.ui.View):
         await storage.set_battle(self.channel_id, state)
         buf = render_battle(state)
         file = discord.File(buf, filename="battle.png")
-        await interaction.response.edit_message(content=state["log_line"], attachments=[file], view=CharacterSelectView(self.channel_id))
+        await interaction.response.edit_message(
+            content=turn_plan_text(state), attachments=[file], view=TurnPlanView(self.channel_id, state["pending_actions"])
+        )
 
 
-# --- Resolution logic ---
+# --- Dodge mini-game ---
+
+class DodgeView(discord.ui.View):
+    def __init__(self, options: list, timeout: float = 12):
+        super().__init__(timeout=timeout)
+        self.choice = None
+        for opt in options:
+            self.add_item(DodgeButton(opt))
+
+
+class DodgeButton(discord.ui.Button):
+    def __init__(self, option: str):
+        super().__init__(label=option.capitalize(), style=discord.ButtonStyle.primary)
+        self.option = option
+
+    async def callback(self, interaction: discord.Interaction):
+        # Acknowledge silently — the real outcome is shown afterward by the
+        # code that's waiting on this view via `await dodge_view.wait()`.
+        await interaction.response.defer()
+        self.view.choice = self.option
+        self.view.stop()
+
+
+def pick_attack_pattern(enemy: dict):
+    """Returns (pattern, safe_option). safe_option is randomized at call
+    time (not stored in data), so it can't just be memorized per enemy."""
+    patterns = enemy.get("attack_patterns") or DEFAULT_ATTACK_PATTERNS
+    pattern = random.choice(patterns)
+    safe_option = random.choice(pattern["options"])
+    return pattern, safe_option
+
+
+def apply_dodge_outcome(state: dict, pattern: dict, safe_option: str, choice):
+    """
+    Mutates state (damage/TP/over/won) based on the dodge result.
+    choice=None means the player didn't answer in time (timeout).
+    Pure logic, no Discord objects involved, so this is unit-testable.
+    """
+    enemy_name = state["enemy_name"]
+
+    if choice is None:
+        outcome = f"You hesitated too long! {enemy_name}'s {pattern['name']} connects!"
+        dodged = False
+    elif choice == safe_option:
+        outcome = f"You dodge {enemy_name}'s {pattern['name']} perfectly!"
+        dodged = True
+    else:
+        outcome = f"Wrong way! {enemy_name}'s {pattern['name']} hits!"
+        dodged = False
+
+    if dodged:
+        # Small reward for a clean dodge — keeps DEFEND from being the only
+        # reliable way to build TP.
+        state["tp"] = min(state["tp_max"], state["tp"] + 4)
+        return outcome
+
+    alive = [k for k, v in state["party"].items() if v["hp"] > 0]
+    if not alive:
+        return outcome
+
+    target = random.choice(alive)
+    dmg = pattern["damage"]
+    state["party"][target]["hp"] = max(0, state["party"][target]["hp"] - dmg)
+    state["tp"] = min(state["tp_max"], state["tp"] + TP_GAIN_HIT_TAKEN)
+    outcome += f"\n{target.capitalize()} takes {dmg} damage!"
+
+    if all(v["hp"] <= 0 for v in state["party"].values()):
+        state["over"] = True
+        state["won"] = False
+        outcome += f"\nThe whole party is down... {enemy_name} overwhelms you."
+
+    return outcome
+
+
+class ConfirmTurnButton(discord.ui.Button):
+    def __init__(self, channel_id):
+        super().__init__(label="Confirm Turn", style=discord.ButtonStyle.success, row=3)
+        self.channel_id = channel_id
+
+    async def callback(self, interaction: discord.Interaction):
+        state = await storage.get_battle(self.channel_id)
+        if not state or state.get("over"):
+            await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
+            return
+
+        guild_id = interaction.guild_id
+        party_text = await resolve_full_party_turn(state, guild_id)
+        await storage.set_battle(self.channel_id, state)
+
+        # Case 1: the party's own actions already ended the fight (enemy
+        # defeated or spared) — no enemy counterattack needed.
+        if state["over"]:
+            view = None if state["won"] else RetryView(self.channel_id)
+            buf = render_battle(state)
+            file = discord.File(buf, filename="battle.png")
+            await interaction.response.edit_message(content=party_text, attachments=[file], view=view)
+            return
+
+        # Case 2: enemy is TIRED and skips its turn entirely.
+        if state.get("tired"):
+            await storage.set_battle(self.channel_id, state)
+            buf = render_battle(state)
+            file = discord.File(buf, filename="battle.png")
+            await interaction.response.edit_message(
+                content=party_text, attachments=[file], view=TurnPlanView(self.channel_id, state["pending_actions"])
+            )
+            return
+
+        # Case 3: enemy attacks — show the telegraph + dodge buttons, wait
+        # for the player's pick (or timeout), then apply the outcome.
+        enemy = ENEMIES[state["enemy_key"]]
+        pattern, safe_option = pick_attack_pattern(enemy)
+        dodge_view = DodgeView(pattern["options"], timeout=12)
+
+        telegraph_text = (
+            party_text + "\n\n" + pattern["telegraph"]
+            + "\n**Choose where to dodge!** (12 seconds)"
+        )
+
+        buf = render_battle(state)
+        file = discord.File(buf, filename="battle.png")
+        await interaction.response.edit_message(content=telegraph_text, attachments=[file], view=dodge_view)
+
+        await dodge_view.wait()
+
+        outcome_text = apply_dodge_outcome(state, pattern, safe_option, dodge_view.choice)
+        await storage.set_battle(self.channel_id, state)
+
+        final_view = None
+        if state["over"]:
+            if not state["won"]:
+                final_view = RetryView(self.channel_id)
+        else:
+            final_view = TurnPlanView(self.channel_id, state["pending_actions"])
+
+        buf = render_battle(state)
+        file = discord.File(buf, filename="battle.png")
+
+        msg = await interaction.original_response()
+        await msg.edit(content=party_text + "\n\n" + outcome_text, attachments=[file], view=final_view)
+
+
+# --- Resolution logic (per-character actions) ---
 
 async def mark_recruited(guild_id: int, enemy_key: str):
     recruits = await storage.get_guild_recruits(guild_id)
@@ -215,36 +393,36 @@ async def mark_lost(guild_id: int, enemy_key: str):
         await storage.set_guild_lost(guild_id, lost)
 
 
-def apply_enemy_turn(state: dict) -> str:
+async def resolve_full_party_turn(state: dict, guild_id=None) -> str:
     """
-    Enemy attacks a random alive party member after the player's action
-    resolves. Without this, party HP never changes and a battle can never
-    actually be lost — !battle_retry's "you lost" path would be dead code.
-    TIRED enemies don't act (they're worn out, per canon flavor).
+    Resolves all three characters' queued actions in order (Kris, Susie,
+    Ralsei), stopping early if the battle ends partway through (e.g. Kris's
+    action already defeats/spares the enemy — Susie and Ralsei don't get
+    to act on a fight that's already over). Clears pending_actions for the
+    next turn regardless of outcome.
     """
-    if state.get("tired"):
-        return ""
+    texts = []
+    enemy = ENEMIES[state["enemy_key"]]
 
-    alive = [k for k, v in state["party"].items() if v["hp"] > 0]
-    if not alive:
-        return ""
+    for character in CHARACTERS:
+        if state["over"]:
+            break
+        pending = state["pending_actions"].get(character)
+        if not pending:
+            continue  # shouldn't happen (Confirm Turn only shows once all 3 are set)
 
-    target = random.choice(alive)
-    dmg = random.randint(5, 18)
-    state["party"][target]["hp"] = max(0, state["party"][target]["hp"] - dmg)
-    state["tp"] = min(state["tp_max"], state["tp"] + TP_GAIN_HIT_TAKEN)
+        if pending["action"] == "act":
+            act = next((a for a in enemy["acts"] if a["name"] == pending["act_name"]), None)
+            if act:
+                texts.append(await resolve_act(state, character, act))
+        else:
+            texts.append(await resolve_action(state, character, pending["action"], guild_id=guild_id))
 
-    text = f"\n{state['enemy_name']} attacks {target.capitalize()} for {dmg} damage!"
-
-    if all(v["hp"] <= 0 for v in state["party"].values()):
-        state["over"] = True
-        state["won"] = False
-        text += f"\nThe whole party is down... {state['enemy_name']} overwhelms you."
-
-    return text
+    state["pending_actions"] = {"kris": None, "susie": None, "ralsei": None}
+    return "\n".join(texts)
 
 
-async def resolve_action(state: dict, character: str, action: str, guild_id: int | None = None) -> str:
+async def resolve_action(state: dict, character: str, action: str, guild_id=None) -> str:
     enemy = ENEMIES[state["enemy_key"]]
 
     if action == "fight":
@@ -357,11 +535,16 @@ class Battle(commands.Cog):
 
         buf = render_battle(state)
         file = discord.File(buf, filename="battle.png")
-        await ctx.send(content=state["log_line"], file=file, view=CharacterSelectView(ctx.channel.id))
+        await ctx.send(content=turn_plan_text(state), file=file, view=TurnPlanView(ctx.channel.id, state["pending_actions"]))
 
     @commands.command(name="battle_retry")
     async def battle_retry(self, ctx: commands.Context):
         """Retry the last battle in this channel."""
+        existing = await storage.get_battle(ctx.channel.id)
+        if existing and not existing.get("over"):
+            await ctx.send("There's already a battle in progress in this channel!")
+            return
+
         last_key = await storage.get_json(f"battle:{ctx.channel.id}:last_enemy")
         if not last_key:
             await ctx.send("No previous battle to retry!")
@@ -370,7 +553,7 @@ class Battle(commands.Cog):
         await storage.set_battle(ctx.channel.id, state)
         buf = render_battle(state)
         file = discord.File(buf, filename="battle.png")
-        await ctx.send(content=state["log_line"], file=file, view=CharacterSelectView(ctx.channel.id))
+        await ctx.send(content=turn_plan_text(state), file=file, view=TurnPlanView(ctx.channel.id, state["pending_actions"]))
 
 
 async def setup(bot: commands.Bot):
