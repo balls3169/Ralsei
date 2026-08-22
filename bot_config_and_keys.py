@@ -19,11 +19,20 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Fallback model chain — tries each in order if one fails/rate-limits.
-# Adjust freely; these are just reasonable starting picks.
+#
+# IMPORTANT: OpenRouter's free-tier model lineup rotates constantly — models
+# get delisted or renamed with little to no notice (this is exactly what
+# caused the "No endpoints found" error). Rather than chase a moving target
+# with hardcoded IDs, we lead with "openrouter/free" — OpenRouter's own
+# auto-router, which always resolves to *some* currently-live free model.
+# The named models behind it are just extra fallbacks; if they 404 one day,
+# that's expected and harmless since openrouter/free (tried first) covers it.
+# If you want to pin specific named models instead, check what's currently
+# free at https://openrouter.ai/models?max_price=0 before hardcoding one.
 OPENROUTER_MODELS = [
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "google/gemini-flash-1.5:free",
-    "mistralai/mistral-7b-instruct:free",
+    "openrouter/free",
+    "meta-llama/llama-4-scout:free",
+    "z-ai/glm-4.5-air:free",
 ]
 
 # --- Upstash Redis (persistent storage) ---
