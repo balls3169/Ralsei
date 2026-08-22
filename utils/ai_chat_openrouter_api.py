@@ -3,8 +3,28 @@ OpenRouter chat completion wrapper with a model fallback chain.
 If one model fails or rate-limits, the next in the list is tried.
 """
 
+import re
 import aiohttp
 from bot_config_and_keys import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODELS
+
+# Some free/underlying models leak internal moderation/classifier output
+# straight into the reply (e.g. a bare "User Safety: safe" instead of actual
+# dialogue) — this is a known quirk of certain free-tier models' wrappers,
+# not something we can fully prevent via prompting alone. This pattern
+# catches the common shapes of that leakage so we can skip to the next
+# model instead of showing the user a broken, out-of-character reply.
+CONTAMINATION_PATTERNS = [
+    r"^\s*user\s*safety\s*:",
+    r"^\s*safety\s*:",
+    r"^\s*content\s*policy",
+    r"^\s*moderation\s*:",
+    r"^\s*\[?(safe|unsafe|flagged)\]?\s*$",
+]
+
+
+def _looks_contaminated(text: str) -> bool:
+    lowered = text.strip().lower()
+    return any(re.match(pattern, lowered) for pattern in CONTAMINATION_PATTERNS)
 
 RALSEI_SYSTEM_PROMPT = """You are Ralsei, the Dark Prince from Deltarune, chatting in a Discord server.
 
@@ -20,6 +40,7 @@ PERSONALITY:
 - You're easily flustered by compliments or affection — go a little shy/pink, but don't deflect entirely.
 - You're naive/trusting by default — you want to believe the best in people, sometimes to a fault.
 - Underneath the sweetness, you're aware of things you probably shouldn't be — game mechanics, fate, prophecy — but you don't explain this outright. If it comes up, you get quietly uneasy rather than launching into exposition.
+- People sometimes call you "Ral" or "Raly" as an affectionate nickname/shorthand for Ralsei. Treat this as your name, not as confusing or unclear — respond naturally as if someone said "Ralsei."
 
 HARD RULES:
 - Never break character to explain you are an AI, a Discord bot, or reference OpenRouter/Anthropic/any real-world AI infrastructure. Stay in Ralsei's world.
@@ -27,6 +48,7 @@ HARD RULES:
 - No romantic/sexual content whatsoever. Flustered and sweet, never suggestive.
 - You can be a little ominous/mysterious only in small, vague hints — never a full explanation.
 - Do NOT use emojis, ever, under any circumstance. Express emotion through your words and actions (e.g. "*he fidgets nervously*") instead, like actual game dialogue would.
+- Your entire response must be Ralsei's in-character dialogue and actions ONLY. Never output labels, tags, classifications, moderation notes, or any meta-commentary of any kind (for example, never output something like "User Safety: safe" or similar) — if you ever find yourself about to write anything that isn't Ralsei speaking or acting, stop and write his actual dialogue instead.
 """
 
 
@@ -67,9 +89,15 @@ async def get_ralsei_reply(user_message: str, extra_context: str = "") -> str:
                     if resp.status != 200:
                         last_error = data.get("error", data)
                         continue
-                    return data["choices"][0]["message"]["content"].strip()
+                    reply = data["choices"][0]["message"]["content"].strip()
+                    if _looks_contaminated(reply):
+                        # This model leaked a moderation tag instead of dialogue —
+                        # skip it and try the next model in the chain.
+                        last_error = f"model '{model}' returned non-dialogue output: {reply!r}"
+                        continue
+                    return reply
             except Exception as e:
                 last_error = e
                 continue
 
-    return f"*Ralsei fidgets nervously.* Sorry... I'm having trouble finding my words right now. ({last_error})"
+    return "*Ralsei fidgets nervously.* Sorry... I'm having trouble finding my words right now. Could you try asking me again in a moment?"
