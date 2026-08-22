@@ -5,16 +5,24 @@ Each enemy is its own dict — ACT menus are per-enemy, not universal,
 per planning (this mirrors how ACT actually works in Deltarune).
 
 Fields:
-  name            - display name
-  hp              - starting/max HP
-  mercy_needed    - % mercy required before SPARE works (100 = must fully fill)
-  acts            - list of dicts: {"name": ..., "mercy_gain": int, "flavor": str,
-                                     "causes_tired": bool}
-  tired_lines     - flavor when this enemy becomes TIRED
-  spare_lines     - flavor when successfully spared
-  encounter_lines - pool of opening lines when the fight starts
-  flirt_sequence  - special-cased list of flirt attempts if this enemy supports
-                     X-Flirt (per planning: fails twice, then works)
+  name             - display name
+  hp               - starting/max HP
+  mercy_needed     - % mercy required before SPARE works (100 = must fully fill)
+  acts             - list of dicts: {"name": ..., "mercy_gain": int, "flavor": str,
+                                      "causes_tired": bool}
+  tired_lines      - flavor when this enemy becomes TIRED
+  spare_lines      - flavor when successfully spared
+  encounter_lines  - pool of opening lines when the fight starts
+  flirt_sequence   - special-cased list of flirt attempts if this enemy supports
+                      X-Flirt (per planning: fails twice, then works)
+  attack_patterns  - list of dicts describing the enemy's attacks for the
+                      dodge mini-game: {"name": ..., "telegraph": ...,
+                      "options": [...], "damage": int}. One is picked at
+                      random each enemy turn; which OPTION is actually safe
+                      is randomized at runtime (not stored here), so it
+                      can't be memorized — you have to react to the
+                      telegraph text and guess/react correctly each time,
+                      similar spirit to reacting to a real bullet pattern.
 
 This is intentionally a small starter roster (2 enemies) to prove out the
 system end-to-end. Add more enemies here following the same shape.
@@ -34,6 +42,20 @@ ENEMIES = {
         "spare_lines": ["Rudinn waves happily and heads off toward Castle Town!"],
         "encounter_lines": ["Rudinn blocks the way!", "A Rudinn zooms in, ready to race!"],
         "flirt_sequence": None,
+        "attack_patterns": [
+            {
+                "name": "Straight Charge",
+                "telegraph": "Rudinn crouches low, wheels spinning — it's lining up a charge down one lane!",
+                "options": ["left", "center", "right"],
+                "damage": 18,
+            },
+            {
+                "name": "Wide Sweep",
+                "telegraph": "Rudinn winds up for a wide, sweeping charge across the field!",
+                "options": ["left", "center", "right"],
+                "damage": 12,
+            },
+        ],
     },
     "head_hathy": {
         "name": "Head Hathy",
@@ -65,5 +87,19 @@ ENEMIES = {
                 "mercy_gain": 50,
             },
         },
+        "attack_patterns": [
+            {
+                "name": "Dive Bomb",
+                "telegraph": "A Head Hathy swoops high into the air, ready to dive!",
+                "options": ["left", "right"],
+                "damage": 14,
+            },
+            {
+                "name": "Feather Storm",
+                "telegraph": "The Head Hathys shake loose a storm of feathers!",
+                "options": ["duck", "jump"],
+                "damage": 10,
+            },
+        ],
     },
 }
