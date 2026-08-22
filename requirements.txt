@@ -1,5 +1,4 @@
-discord.py[voice]
-PyNaCl
+discord.py
 aiohttp
 imageio-ffmpeg
 Pillow
