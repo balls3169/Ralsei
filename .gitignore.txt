@@ -1,0 +1,12 @@
+# Never commit your real secrets — this is what keeps your token/keys
+# out of GitHub even if you `git add .` carelessly.
+.env
+
+__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+venv/
+
+.DS_Store
