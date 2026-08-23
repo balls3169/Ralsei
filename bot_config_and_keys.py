@@ -61,3 +61,26 @@ TP_GAIN_DEFEND = 16
 TP_GAIN_HIT_TAKEN = 8
 PACIFY_TP_COST = 16
 DUAL_HEAL_TP_COST = 32
+
+# --- Dodge mini-game tuning ---
+# Base time (seconds) to pick a dodge option, shrinking slightly each turn
+# to build tension as a fight drags on — floors out so it never becomes
+# unfairly fast.
+DODGE_TIMEOUT_BASE = 12
+DODGE_TIMEOUT_FLOOR = 6
+DODGE_TIMEOUT_STEP_PER_TURN = 0.5
+
+# For lanes with 3+ options (e.g. left/center/right), picking a lane
+# ADJACENT to the safe one is a partial miss ("graze") rather than a full
+# hit — mirrors Deltarune's real graze mechanic, where nearly avoiding a
+# bullet still earns you something. Binary lanes (e.g. duck/jump) don't
+# get partial credit since there's no "adjacent" option — any wrong pick
+# there is a full hit, same as before.
+GRAZE_DAMAGE_MULTIPLIER_NEAR = 0.4   # picked the lane right next to safe
+GRAZE_DAMAGE_MULTIPLIER_FAR = 1.0    # picked the lane furthest from safe
+GRAZE_TP_BONUS = 6                   # bonus TP for a close-call graze
+CLEAN_DODGE_TP_BONUS = 4             # bonus TP for a fully correct dodge
+
+# --- FIGHT crit chance ---
+FIGHT_CRIT_CHANCE = 0.15
+FIGHT_CRIT_MULTIPLIER = 1.5
