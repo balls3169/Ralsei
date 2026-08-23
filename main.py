@@ -22,6 +22,13 @@ from utils.database_upstash_connection import storage
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ralsei_bot")
 
+# Quiets the routine "GET / HTTP/1.1 200" lines that cron-job.org's keep-alive
+# pings generate every few minutes — those are expected and harmless (they're
+# literally what keeps Render from spinning down), just noisy in the Logs
+# tab. This only silences that specific access-log line; real bot activity
+# (cogs loading, errors, "Logged in as...") still logs normally above.
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+
 INTENTS = discord.Intents.default()
 INTENTS.message_content = True  # required to read command text / free-chat mentions
 
