@@ -17,15 +17,22 @@ Fields:
                       X-Flirt (per planning: fails twice, then works)
   attack_patterns  - list of dicts describing the enemy's attacks for the
                       dodge mini-game: {"name": ..., "telegraph": ...,
-                      "options": [...], "damage": int}. One is picked at
-                      random each enemy turn; which OPTION is actually safe
-                      is randomized at runtime (not stored here), so it
-                      can't be memorized — you have to react to the
-                      telegraph text and guess/react correctly each time,
-                      similar spirit to reacting to a real bullet pattern.
+                      "options": [...], "damage": int, "hits": int (optional,
+                      default 1)}. One is picked at random each enemy turn;
+                      which OPTION is actually safe is randomized at runtime
+                      (not stored here) for EACH hit separately, so it can't
+                      be memorized — you have to react to the telegraph text
+                      and guess/react correctly each time. "hits" > 1 means
+                      the attack fires multiple times in a row (e.g. a
+                      3-hit feather storm), each needing its own dodge pick.
 
-This is intentionally a small starter roster (2 enemies) to prove out the
-system end-to-end. Add more enemies here following the same shape.
+Roster covers Chapter 1 (Rudinn, Jigsawry, Ponman) and Chapter 2
+(Head Hathy, Werewire) enemies, with ACT options/flavor grounded in their
+actual canon mechanics (e.g. Jigsawry's Befriend really does instantly
+make all Jigsawry spareable in-game; Ponman's Goodnight/Lullaby really do
+cause TIRED; Werewire really does turn back into a Plugboy when spared).
+
+Add more enemies here following the same shape.
 """
 
 ENEMIES = {
@@ -54,6 +61,7 @@ ENEMIES = {
                 "telegraph": "Rudinn winds up for a wide, sweeping charge across the field!",
                 "options": ["left", "center", "right"],
                 "damage": 12,
+                "hits": 2,
             },
         ],
     },
@@ -99,6 +107,79 @@ ENEMIES = {
                 "telegraph": "The Head Hathys shake loose a storm of feathers!",
                 "options": ["duck", "jump"],
                 "damage": 10,
+                "hits": 3,
+            },
+        ],
+    },
+    "jigsawry": {
+        "name": "Jigsawry",
+        "hp": 50,
+        "mercy_needed": 100,
+        "acts": [
+            {"name": "Check", "mercy_gain": 0, "flavor": "A jigsaw-puzzle-piece Darkner with a beanie. Very sensitive and emotional. Only fighting out of desperation for money.", "causes_tired": False},
+            # Per canon: Befriend instantly makes Jigsawry (and any other
+            # Jigsawry in the fight) spareable outright.
+            {"name": "Befriend", "mercy_gain": 100, "flavor": "You offer to be Jigsawry's friend. It immediately tears up with joy!", "causes_tired": False},
+        ],
+        "tired_lines": ["Jigsawry looks exhausted, its edges fraying."],
+        "spare_lines": ["Jigsawry cries tears of joy, thrilled to have a new boss!"],
+        "encounter_lines": ["A Jigsawry piece wobbles into view!", "Two jigsaw pieces snap together as Jigsawry appears!"],
+        "flirt_sequence": None,
+        "attack_patterns": [
+            {
+                "name": "Puzzle Snap",
+                "telegraph": "Two jigsaw pieces drift out on either side, tracking your movement — they're about to snap together!",
+                "options": ["left", "right"],
+                "damage": 10,
+            },
+        ],
+    },
+    "ponman": {
+        "name": "Ponman",
+        "hp": 75,
+        "mercy_needed": 100,
+        "acts": [
+            {"name": "Check", "mercy_gain": 0, "flavor": "A white, chess-piece-shaped Darkner. Watches quietly, calculating its next move.", "causes_tired": False},
+            # Per canon: Goodnight makes a Ponman TIRED and spareable.
+            {"name": "Goodnight", "mercy_gain": 0, "flavor": "You tell Ponman goodnight. It grows drowsy...", "causes_tired": True},
+            # Per canon: Lullaby (a Ralsei-assisted ACT) makes ALL Ponmen
+            # tired at once, at the cost of also lulling Susie to sleep —
+            # kept here as flavor-only since our system doesn't yet model
+            # disabling a specific party member mid-fight.
+            {"name": "Lullaby", "mercy_gain": 0, "flavor": "Ralsei hums a soft lullaby. All the Ponmen grow drowsy — and Susie yawns right along with them.", "causes_tired": True},
+        ],
+        "tired_lines": ["Ponman's eyes droop, chess-piece head nodding."],
+        "spare_lines": ["Ponman bows quietly and steps aside."],
+        "encounter_lines": ["Ponman shuffles forward, chess-piece eyes narrowing."],
+        "flirt_sequence": None,
+        "attack_patterns": [
+            {
+                "name": "Diamond Volley",
+                "telegraph": "Ponman readies a volley of diamond-shaped shots, aimed down one lane!",
+                "options": ["left", "center", "right"],
+                "damage": 14,
+            },
+        ],
+    },
+    "werewire": {
+        "name": "Werewire",
+        "hp": 85,
+        "mercy_needed": 100,
+        "acts": [
+            {"name": "Check", "mercy_gain": 0, "flavor": "A feral Darkner tangled in wire — once a friendly Plugboy, gone a bit wild.", "causes_tired": False},
+            {"name": "Unplug", "mercy_gain": 50, "flavor": "You carefully unplug Werewire from the wall. It relaxes, wires going slack.", "causes_tired": False},
+        ],
+        "tired_lines": ["Werewire's cord sparks weakly, worn down."],
+        # Per canon: a spared Werewire reverts back into a friendly Plugboy.
+        "spare_lines": ["Werewire calms down completely, transforming back into a friendly Plugboy!"],
+        "encounter_lines": ["A Werewire lunges out from a wall socket!", "ZZT! A Werewire crackles to life!"],
+        "flirt_sequence": None,
+        "attack_patterns": [
+            {
+                "name": "Static Whip",
+                "telegraph": "Werewire's cord whips out, crackling with static electricity!",
+                "options": ["duck", "jump"],
+                "damage": 16,
             },
         ],
     },
