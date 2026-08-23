@@ -28,7 +28,12 @@ from discord.ext import commands
 from utils.database_upstash_connection import storage
 from utils.battle_image_renderer import render_battle
 from data.lore_enemies_and_acts import ENEMIES
-from bot_config_and_keys import PACIFY_TP_COST, DUAL_HEAL_TP_COST, TP_GAIN_DEFEND, TP_GAIN_HIT_TAKEN, SHARED_TP_MAX
+from bot_config_and_keys import (
+    PACIFY_TP_COST, DUAL_HEAL_TP_COST, TP_GAIN_DEFEND, TP_GAIN_HIT_TAKEN, SHARED_TP_MAX,
+    DODGE_TIMEOUT_BASE, DODGE_TIMEOUT_FLOOR, DODGE_TIMEOUT_STEP_PER_TURN,
+    GRAZE_DAMAGE_MULTIPLIER_NEAR, GRAZE_DAMAGE_MULTIPLIER_FAR, GRAZE_TP_BONUS, CLEAN_DODGE_TP_BONUS,
+    FIGHT_CRIT_CHANCE, FIGHT_CRIT_MULTIPLIER,
+)
 
 STARTING_PARTY = {
     "kris": {"hp": 100, "max_hp": 100},
@@ -67,6 +72,7 @@ def new_battle_state(enemy_key: str) -> dict:
         "log_line": random.choice(enemy["encounter_lines"]),
         "flirt_used": {"susie": False, "ralsei": False},
         "pending_actions": {"kris": None, "susie": None, "ralsei": None},
+        "turn_number": 0,
         "over": False,
         "won": False,
     }
@@ -260,44 +266,74 @@ class DodgeButton(discord.ui.Button):
 
 
 def pick_attack_pattern(enemy: dict):
-    """Returns (pattern, safe_option). safe_option is randomized at call
-    time (not stored in data), so it can't just be memorized per enemy."""
+    """Returns a pattern dict (safe option is now picked per-hit, since
+    multi-hit patterns need a fresh safe lane for each individual hit)."""
     patterns = enemy.get("attack_patterns") or DEFAULT_ATTACK_PATTERNS
-    pattern = random.choice(patterns)
-    safe_option = random.choice(pattern["options"])
-    return pattern, safe_option
+    return random.choice(patterns)
 
 
-def apply_dodge_outcome(state: dict, pattern: dict, safe_option: str, choice):
+def dodge_timeout_for_turn(turn_number: int) -> float:
+    """Dodge windows shrink slightly as a fight drags on, building tension,
+    but never go below the floor."""
+    return max(DODGE_TIMEOUT_FLOOR, DODGE_TIMEOUT_BASE - turn_number * DODGE_TIMEOUT_STEP_PER_TURN)
+
+
+def lane_damage_multiplier(options: list, safe_option: str, choice) -> float:
     """
-    Mutates state (damage/TP/over/won) based on the dodge result.
+    1.0 = full hit, 0.0 = fully dodged, in between = a "graze" (partial
+    miss). Only lanes with 3+ options get partial credit for picking a
+    lane ADJACENT to the safe one — binary lanes (e.g. duck/jump) have no
+    "adjacent" option, so any wrong pick there is a full hit, same as
+    before. This mirrors Deltarune's real graze mechanic, where nearly
+    avoiding a bullet still counts for something.
+    """
+    if choice is None:
+        return 1.0  # timeout — no positioning info, treat as a full miss
+    if choice == safe_option:
+        return 0.0
+    if len(options) < 3:
+        return 1.0
+
+    safe_idx = options.index(safe_option)
+    choice_idx = options.index(choice)
+    max_dist = len(options) - 1
+    dist = abs(safe_idx - choice_idx)
+    frac = dist / max_dist
+    # Closest wrong lane -> GRAZE_DAMAGE_MULTIPLIER_NEAR, furthest -> _FAR.
+    return GRAZE_DAMAGE_MULTIPLIER_NEAR + (GRAZE_DAMAGE_MULTIPLIER_FAR - GRAZE_DAMAGE_MULTIPLIER_NEAR) * frac
+
+
+def apply_single_hit(state: dict, pattern: dict, safe_option: str, choice, hit_label: str = "") -> str:
+    """
+    Mutates state (damage/TP/over/won) based on one hit's dodge result.
     choice=None means the player didn't answer in time (timeout).
     Pure logic, no Discord objects involved, so this is unit-testable.
+    Returns the outcome text for this single hit.
     """
     enemy_name = state["enemy_name"]
+    multiplier = lane_damage_multiplier(pattern["options"], safe_option, choice)
+    label = f" ({hit_label})" if hit_label else ""
+
+    if multiplier <= 0.0:
+        state["tp"] = min(state["tp_max"], state["tp"] + CLEAN_DODGE_TP_BONUS)
+        return f"You dodge {enemy_name}'s {pattern['name']}{label} perfectly!"
 
     if choice is None:
-        outcome = f"You hesitated too long! {enemy_name}'s {pattern['name']} connects!"
-        dodged = False
-    elif choice == safe_option:
-        outcome = f"You dodge {enemy_name}'s {pattern['name']} perfectly!"
-        dodged = True
+        outcome = f"You hesitated too long! {enemy_name}'s {pattern['name']}{label} connects!"
+    elif multiplier < 1.0:
+        # A graze — nearly dodged it. Reward TP for the close call, like
+        # Deltarune's real graze mechanic, even though some damage lands.
+        outcome = f"Close! You almost dodge {enemy_name}'s {pattern['name']}{label} — just grazed."
+        state["tp"] = min(state["tp_max"], state["tp"] + GRAZE_TP_BONUS)
     else:
-        outcome = f"Wrong way! {enemy_name}'s {pattern['name']} hits!"
-        dodged = False
-
-    if dodged:
-        # Small reward for a clean dodge — keeps DEFEND from being the only
-        # reliable way to build TP.
-        state["tp"] = min(state["tp_max"], state["tp"] + 4)
-        return outcome
+        outcome = f"Wrong way! {enemy_name}'s {pattern['name']}{label} hits!"
 
     alive = [k for k, v in state["party"].items() if v["hp"] > 0]
     if not alive:
         return outcome
 
     target = random.choice(alive)
-    dmg = pattern["damage"]
+    dmg = max(1, round(pattern["damage"] * multiplier))
     state["party"][target]["hp"] = max(0, state["party"][target]["hp"] - dmg)
     state["tp"] = min(state["tp_max"], state["tp"] + TP_GAIN_HIT_TAKEN)
     outcome += f"\n{target.capitalize()} takes {dmg} damage!"
@@ -320,6 +356,8 @@ class ConfirmTurnButton(discord.ui.Button):
         if not state or state.get("over"):
             await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
             return
+
+        state["turn_number"] = state.get("turn_number", 0) + 1
 
         guild_id = interaction.guild_id
         party_text = await resolve_full_party_turn(state, guild_id)
@@ -346,23 +384,46 @@ class ConfirmTurnButton(discord.ui.Button):
 
         # Case 3: enemy attacks — show the telegraph + dodge buttons, wait
         # for the player's pick (or timeout), then apply the outcome.
+        # Patterns with "hits" > 1 fire multiple times in a row, each
+        # needing its own dodge pick with a freshly randomized safe lane.
         enemy = ENEMIES[state["enemy_key"]]
-        pattern, safe_option = pick_attack_pattern(enemy)
-        dodge_view = DodgeView(pattern["options"], timeout=12)
+        pattern = pick_attack_pattern(enemy)
+        total_hits = pattern.get("hits", 1)
+        timeout = dodge_timeout_for_turn(state["turn_number"])
 
-        telegraph_text = (
-            party_text + "\n\n" + pattern["telegraph"]
-            + "\n**Choose where to dodge!** (12 seconds)"
-        )
+        outcome_texts = []
+        responded = False  # tracks whether interaction.response has been used yet
 
-        buf = render_battle(state)
-        file = discord.File(buf, filename="battle.png")
-        await interaction.response.edit_message(content=telegraph_text, attachments=[file], view=dodge_view)
+        for hit_index in range(total_hits):
+            if state["over"]:
+                break
 
-        await dodge_view.wait()
+            safe_option = random.choice(pattern["options"])
+            dodge_view = DodgeView(pattern["options"], timeout=timeout)
 
-        outcome_text = apply_dodge_outcome(state, pattern, safe_option, dodge_view.choice)
-        await storage.set_battle(self.channel_id, state)
+            hit_label = f"hit {hit_index + 1}/{total_hits}" if total_hits > 1 else ""
+            countdown = int(timeout)
+            telegraph_text = (
+                party_text + ("\n\n" + "\n\n".join(outcome_texts) if outcome_texts else "")
+                + "\n\n" + pattern["telegraph"]
+                + (f" ({hit_label})" if hit_label else "")
+                + f"\n**Choose where to dodge!** ({countdown} seconds)"
+            )
+
+            buf = render_battle(state)
+            file = discord.File(buf, filename="battle.png")
+
+            if not responded:
+                await interaction.response.edit_message(content=telegraph_text, attachments=[file], view=dodge_view)
+                responded = True
+            else:
+                msg = await interaction.original_response()
+                await msg.edit(content=telegraph_text, attachments=[file], view=dodge_view)
+
+            await dodge_view.wait()
+
+            outcome_texts.append(apply_single_hit(state, pattern, safe_option, dodge_view.choice, hit_label))
+            await storage.set_battle(self.channel_id, state)
 
         final_view = None
         if state["over"]:
@@ -374,8 +435,9 @@ class ConfirmTurnButton(discord.ui.Button):
         buf = render_battle(state)
         file = discord.File(buf, filename="battle.png")
 
+        final_text = party_text + "\n\n" + "\n\n".join(outcome_texts)
         msg = await interaction.original_response()
-        await msg.edit(content=party_text + "\n\n" + outcome_text, attachments=[file], view=final_view)
+        await msg.edit(content=final_text, attachments=[file], view=final_view)
 
 
 # --- Resolution logic (per-character actions) ---
@@ -427,8 +489,13 @@ async def resolve_action(state: dict, character: str, action: str, guild_id=None
 
     if action == "fight":
         dmg = random.randint(15, 30) if character == "susie" else random.randint(5, 15)
+        is_crit = random.random() < FIGHT_CRIT_CHANCE
+        if is_crit:
+            dmg = round(dmg * FIGHT_CRIT_MULTIPLIER)
         state["enemy_hp"] = max(0, state["enemy_hp"] - dmg)
         text = f"{character.capitalize()} attacks! {enemy['name']} takes {dmg} damage."
+        if is_crit:
+            text += " Critical hit!"
         # Fighting to defeat = violent kill = enemy becomes LOST (per planning, guard-railed elsewhere).
         if state["enemy_hp"] <= 0:
             state["over"] = True
