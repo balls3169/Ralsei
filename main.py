@@ -60,7 +60,13 @@ async def ralsei_help(ctx: commands.Context):
             f"**{COMMAND_PREFIX}battle <enemy>** — starts a battle! You can choose who acts each turn.\n"
             f"**{COMMAND_PREFIX}battle_retry** — tries the last battle again, if things went poorly.\n"
             f"**{COMMAND_PREFIX}castle_town** — see who's been recruited to Castle Town so far.\n"
-            f"**{COMMAND_PREFIX}checkr <name>** — check information on a Darkner.\n\n"
+            f"**{COMMAND_PREFIX}checkr <name>** — check information on a Darkner.\n"
+            f"**{COMMAND_PREFIX}bake** — Ralsei bakes something for you.\n"
+            f"**{COMMAND_PREFIX}fortune** — a tea leaf reading, once per day.\n"
+            f"**{COMMAND_PREFIX}prophecy** — hear a cryptic fragment.\n"
+            f"**{COMMAND_PREFIX}compliment** — let Ralsei say something nice about you, for once.\n"
+            f"**{COMMAND_PREFIX}tp / {COMMAND_PREFIX}party** — check the party's TP/HP during a battle.\n"
+            f"**{COMMAND_PREFIX}about** — a short introduction to who I am.\n\n"
             "You can also just... talk to me, if you mention me or send a DM. I'll try my best to answer."
         ),
         color=discord.Color.from_rgb(150, 200, 130),
