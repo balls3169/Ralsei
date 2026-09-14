@@ -39,6 +39,7 @@ COGS = [
     "cogs.commands_ai_personality_chat",
     "cogs.commands_battle_system",
     "cogs.commands_castle_town_recruits",
+    "cogs.commands_flavor_and_utility",
 ]
 
 
