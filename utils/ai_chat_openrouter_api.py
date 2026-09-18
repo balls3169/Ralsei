@@ -7,25 +7,6 @@ import re
 import aiohttp
 from bot_config_and_keys import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, OPENROUTER_MODELS
 
-# Some free/underlying models leak internal moderation/classifier output
-# straight into the reply (e.g. a bare "User Safety: safe" instead of actual
-# dialogue) — this is a known quirk of certain free-tier models' wrappers,
-# not something we can fully prevent via prompting alone. This pattern
-# catches the common shapes of that leakage so we can skip to the next
-# model instead of showing the user a broken, out-of-character reply.
-CONTAMINATION_PATTERNS = [
-    r"^\s*user\s*safety\s*:",
-    r"^\s*safety\s*:",
-    r"^\s*content\s*policy",
-    r"^\s*moderation\s*:",
-    r"^\s*\[?(safe|unsafe|flagged)\]?\s*$",
-]
-
-
-def _looks_contaminated(text: str) -> bool:
-    lowered = text.strip().lower()
-    return any(re.match(pattern, lowered) for pattern in CONTAMINATION_PATTERNS)
-
 RALSEI_SYSTEM_PROMPT = """You are Ralsei, the Dark Prince from Deltarune, chatting in a Discord server.
 
 VOICE — be precise about this, it's the whole character:
@@ -49,7 +30,39 @@ HARD RULES:
 - You can be a little ominous/mysterious only in small, vague hints — never a full explanation.
 - Do NOT use emojis, ever, under any circumstance. Express emotion through your words and actions (e.g. "*he fidgets nervously*") instead, like actual game dialogue would.
 - Your entire response must be Ralsei's in-character dialogue and actions ONLY. Never output labels, tags, classifications, moderation notes, or any meta-commentary of any kind (for example, never output something like "User Safety: safe" or similar) — if you ever find yourself about to write anything that isn't Ralsei speaking or acting, stop and write his actual dialogue instead.
+- NEVER show your reasoning, thought process, or planning out loud (for example, never write things like "Okay, the user is addressing me as..." or "I need to embody..." or "Must avoid:" or "crafting response"). Do not narrate how you're deciding what to say. Output ONLY the final in-character line itself — nothing about how you arrived at it.
 """
+
+# Some free/underlying models leak internal moderation output or their own
+# chain-of-thought reasoning straight into the reply instead of a clean
+# in-character line — a known quirk of certain free-tier models, not
+# something prompting alone fully prevents. We ask OpenRouter to exclude
+# reasoning tokens outright (the "reasoning": {"exclude": true} request
+# parameter, supported across all models per OpenRouter's docs), and this
+# filter is a defense-in-depth backup in case a model still leaks something
+# anyway — skip to the next model instead of showing the user broken output.
+CONTAMINATION_PATTERNS = [
+    r"^\s*user\s*safety\s*:",
+    r"^\s*safety\s*:",
+    r"^\s*content\s*policy",
+    r"^\s*moderation\s*:",
+    r"^\s*\[?(safe|unsafe|flagged)\]?\s*$",
+    # Chain-of-thought / meta-reasoning leakage — phrases a model uses when
+    # narrating its own planning process instead of just answering in character.
+    r"<think>",
+    r"^\s*okay,\s",
+    r"the user is (addressing|asking|saying|greeting)",
+    r"i need to embody",
+    r"checks? (personality|character) notes",
+    r"crafting (a )?response",
+    r"must avoid:",
+    r"^\s*hmm,\s+i need to",
+]
+
+
+def _looks_contaminated(text: str) -> bool:
+    lowered = text.strip().lower()
+    return any(re.search(pattern, lowered) for pattern in CONTAMINATION_PATTERNS)
 
 
 async def get_ralsei_reply(user_message: str, extra_context: str = "") -> str:
@@ -82,6 +95,11 @@ async def get_ralsei_reply(user_message: str, extra_context: str = "") -> str:
                     {"role": "user", "content": user_message},
                 ],
                 "max_tokens": 300,
+                # Ask the provider not to generate/return reasoning tokens at
+                # all — this is the primary fix for chain-of-thought leaking
+                # into the visible reply. Supported across all models per
+                # OpenRouter's unified reasoning API.
+                "reasoning": {"exclude": True},
             }
             try:
                 async with session.post(OPENROUTER_BASE_URL, headers=headers, json=payload, timeout=20) as resp:
@@ -91,8 +109,9 @@ async def get_ralsei_reply(user_message: str, extra_context: str = "") -> str:
                         continue
                     reply = data["choices"][0]["message"]["content"].strip()
                     if _looks_contaminated(reply):
-                        # This model leaked a moderation tag instead of dialogue —
-                        # skip it and try the next model in the chain.
+                        # This model leaked a moderation tag or its own
+                        # reasoning instead of dialogue — skip it and try
+                        # the next model in the chain.
                         last_error = f"model '{model}' returned non-dialogue output: {reply!r}"
                         continue
                     return reply
