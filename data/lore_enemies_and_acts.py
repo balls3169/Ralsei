@@ -183,4 +183,35 @@ ENEMIES = {
             },
         ],
     },
+    "ambyu_lance": {
+        "name": "Ambyu-Lance",
+        "hp": 95,
+        "mercy_needed": 100,
+        "acts": [
+            {"name": "Check", "mercy_gain": 0, "flavor": "An antivirus Darkner with a syringe for a head. Acts like a stereotypical police officer — loud, aggressive, oddly proud of its job.", "causes_tired": False},
+            # Per canon: Hospitality instantly gives 100% mercy — canonically
+            # tied to Noelle being in the party, but simplified here to a
+            # straightforward high-value ACT since this bot's party is fixed
+            # to Kris/Susie/Ralsei.
+            {"name": "Hospitality", "mercy_gain": 100, "flavor": "You're warm and welcoming, despite the circumstances. Ambyu-Lance's stern expression falters — it seems to have a soft side after all.", "causes_tired": False},
+        ],
+        "tired_lines": ["Ambyu-Lance's siren winds down, sputtering weakly."],
+        "spare_lines": ["Ambyu-Lance straightens up and gives an awkward salute before heading to Castle Town."],
+        "encounter_lines": ["An Ambyu-Lance zooms in, siren blaring!", "Ambyu-Lance points its syringe accusingly. \"You'll need TWO apples to stop ME!\""],
+        "flirt_sequence": None,
+        "attack_patterns": [
+            {
+                "name": "Cross Volley",
+                "telegraph": "Ambyu-Lance's siren blares — a volley of crosses flies in from one side!",
+                "options": ["left", "right"],
+                "damage": 14,
+            },
+            {
+                "name": "Siren Dash",
+                "telegraph": "Ambyu-Lance's syringe-tip spins, then it darts forward in the direction it's pointing!",
+                "options": ["left", "center", "right"],
+                "damage": 18,
+            },
+        ],
+    },
 }
