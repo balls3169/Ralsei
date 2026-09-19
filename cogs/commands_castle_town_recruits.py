@@ -5,6 +5,11 @@ there's a single town everyone contributes to).
 
 !checkr <darkner> — mirrors the in-game CHECK command, works as a
 standalone lookup/encyclopedia entry, not just inside battle.
+
+!recruit_all — creator-only. Instantly recruits every known enemy type
+into this server's Castle Town, and clears the LOST list entirely, so
+even enemy types that were previously defeated violently are treated as
+if they'd always been peacefully recruited.
 """
 
 import discord
@@ -12,6 +17,7 @@ from discord.ext import commands
 
 from utils.database_upstash_connection import storage
 from data.lore_enemies_and_acts import ENEMIES
+from bot_config_and_keys import CREATOR_ID
 
 
 class CastleTown(commands.Cog):
@@ -64,6 +70,33 @@ class CastleTown(commands.Cog):
         embed = discord.Embed(title=f"CHECK: {enemy['name']}", description=description, color=discord.Color.from_rgb(100, 100, 200))
         embed.add_field(name="HP", value=str(enemy["hp"]))
         await ctx.send(embed=embed)
+
+    @commands.command(name="recruit_all")
+    async def recruit_all(self, ctx: commands.Context):
+        """Creator-only: instantly recruit every enemy type, clearing any LOST status."""
+        if not CREATOR_ID or ctx.author.id != CREATOR_ID:
+            await ctx.send("*Ralsei tilts his head.* Sorry, I don't think that's something just anyone can do.")
+            return
+
+        if not ctx.guild:
+            await ctx.send("Castle Town only exists per-server — try this in a server, not a DM!")
+            return
+
+        recruits = await storage.get_guild_recruits(ctx.guild.id)
+        for key in ENEMIES:
+            recruits[key] = max(recruits.get(key, 0), 1)
+        await storage.set_guild_recruits(ctx.guild.id, recruits)
+
+        # Clearing the LOST list entirely means even enemy types that were
+        # previously defeated violently are now treated as if they'd always
+        # been peacefully recruited instead.
+        await storage.set_guild_lost(ctx.guild.id, [])
+
+        await ctx.send(
+            f"*Ralsei blinks in surprise, then smiles warmly.* "
+            f"Every Darkner has found their way to Castle Town — even the ones that... didn't, before. "
+            f"({len(ENEMIES)} types recruited.)"
+        )
 
 
 async def setup(bot: commands.Bot):
