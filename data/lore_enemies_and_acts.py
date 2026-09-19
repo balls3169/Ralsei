@@ -9,7 +9,14 @@ Fields:
   hp               - starting/max HP
   mercy_needed     - % mercy required before SPARE works (100 = must fully fill)
   acts             - list of dicts: {"name": ..., "mercy_gain": int, "flavor": str,
-                                      "causes_tired": bool}
+                                      "causes_tired": bool, "requires_character": str|None}.
+                      "requires_character" marks an act as needing a specific
+                      party member's help to make narrative sense (e.g.
+                      Ponman's Lullaby is explicitly Ralsei-assisted) — if
+                      that character is downed (0 HP), the act won't be
+                      offered that turn, since it wouldn't make sense for
+                      Ralsei to hum a lullaby while unconscious. None means
+                      no restriction.
   tired_lines      - flavor when this enemy becomes TIRED
   spare_lines      - flavor when successfully spared
   encounter_lines  - pool of opening lines when the fight starts
@@ -145,8 +152,9 @@ ENEMIES = {
             # Per canon: Lullaby (a Ralsei-assisted ACT) makes ALL Ponmen
             # tired at once, at the cost of also lulling Susie to sleep —
             # kept here as flavor-only since our system doesn't yet model
-            # disabling a specific party member mid-fight.
-            {"name": "Lullaby", "mercy_gain": 0, "flavor": "Ralsei hums a soft lullaby. All the Ponmen grow drowsy — and Susie yawns right along with them.", "causes_tired": True},
+            # disabling a specific party member mid-fight. Requires Ralsei
+            # to actually be conscious to hum it, though.
+            {"name": "Lullaby", "mercy_gain": 0, "flavor": "Ralsei hums a soft lullaby. All the Ponmen grow drowsy — and Susie yawns right along with them.", "causes_tired": True, "requires_character": "ralsei"},
         ],
         "tired_lines": ["Ponman's eyes droop, chess-piece head nodding."],
         "spare_lines": ["Ponman bows quietly and steps aside."],
