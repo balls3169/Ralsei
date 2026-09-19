@@ -33,8 +33,26 @@ from bot_config_and_keys import (
     PACIFY_TP_COST, DUAL_HEAL_TP_COST, TP_GAIN_DEFEND, TP_GAIN_HIT_TAKEN, SHARED_TP_MAX,
     DODGE_TIMEOUT_BASE, DODGE_TIMEOUT_FLOOR, DODGE_TIMEOUT_STEP_PER_TURN,
     GRAZE_DAMAGE_MULTIPLIER_NEAR, GRAZE_DAMAGE_MULTIPLIER_FAR, GRAZE_TP_BONUS, CLEAN_DODGE_TP_BONUS,
-    FIGHT_CRIT_CHANCE, FIGHT_CRIT_MULTIPLIER,
+    FIGHT_CRIT_CHANCE, FIGHT_CRIT_MULTIPLIER, HEAL_PRAYER_TP_COST, RUDE_BUSTER_TP_COST,
 )
+
+# MAGIC menu options per character. S-Action/R-Action live INSIDE the MAGIC
+# menu (per canon — they're not separate top-level buttons), alongside each
+# character's actual spells.
+MAGIC_OPTIONS = {
+    "ralsei": [
+        ("heal_prayer", "Heal Prayer"),
+        ("dual_heal", "Dual Heal"),
+        ("pacify", "Pacify"),
+        ("r_action", "R-Action"),
+    ],
+    "susie": [
+        ("rude_buster", "Rude Buster"),
+        ("s_action", "S-Action"),
+    ],
+}
+
+SPELL_LABELS = {key: label for options in MAGIC_OPTIONS.values() for key, label in options}
 
 STARTING_PARTY = {
     "kris": {"hp": 100, "max_hp": 100},
@@ -87,6 +105,8 @@ def _describe_pending(pending):
         return f"ACT: {pending['act_name']}"
     if pending["action"] == "item":
         return f"ITEM: {ITEMS[pending['item_key']]['name']}"
+    if pending["action"] == "magic":
+        return f"MAGIC: {SPELL_LABELS.get(pending['spell'], pending['spell'])}"
     return pending["action"].upper()
 
 
@@ -143,14 +163,16 @@ class ActionSelectView(discord.ui.View):
 
         if character == "kris":
             self.add_item(ActionButton("ACT", discord.ButtonStyle.primary, channel_id, character, "act"))
-            self.add_item(ActionButton("SPARE", discord.ButtonStyle.success, channel_id, character, "spare"))
         else:
+            # S-Action/R-Action live INSIDE the MAGIC menu per canon, not as
+            # separate top-level buttons — MAGIC now opens a submenu.
             self.add_item(ActionButton("MAGIC", discord.ButtonStyle.primary, channel_id, character, "magic"))
-            special_label = "S-Action" if character == "susie" else "R-Action"
-            self.add_item(ActionButton(special_label, discord.ButtonStyle.secondary, channel_id, character, "special"))
 
         self.add_item(ActionButton("ITEM", discord.ButtonStyle.secondary, channel_id, character, "item"))
         self.add_item(ActionButton("DEFEND", discord.ButtonStyle.secondary, channel_id, character, "defend"))
+        # SPARE is available to anyone, not just Kris — sparing is gated on
+        # the enemy's mercy level, not on who's asking.
+        self.add_item(ActionButton("SPARE", discord.ButtonStyle.success, channel_id, character, "spare"))
         self.add_item(BackButton(channel_id))
 
 
@@ -169,8 +191,21 @@ class ActionButton(discord.ui.Button):
 
         if self.action == "act" and self.character == "kris":
             enemy = ENEMIES[state["enemy_key"]]
-            view = ActMenuView(self.channel_id, enemy["acts"])
-            await interaction.response.edit_message(content="Choose an ACT for Kris:", view=view)
+            available_acts = [
+                a for a in enemy["acts"]
+                if not a.get("requires_character") or state["party"][a["requires_character"]]["hp"] > 0
+            ]
+            hidden_count = len(enemy["acts"]) - len(available_acts)
+            msg = "Choose an ACT for Kris:"
+            if hidden_count:
+                msg += f" (some options aren't available right now — {hidden_count} require a party member who's currently down)"
+            view = ActMenuView(self.channel_id, available_acts)
+            await interaction.response.edit_message(content=msg, view=view)
+            return
+
+        if self.action == "magic" and self.character in MAGIC_OPTIONS:
+            view = MagicMenuView(self.channel_id, self.character)
+            await interaction.response.edit_message(content=f"Choose a spell for {self.character.capitalize()}:", view=view)
             return
 
         if self.action == "item":
@@ -216,6 +251,34 @@ class ActButton(discord.ui.Button):
             return
 
         state["pending_actions"]["kris"] = {"action": "act", "act_name": self.act["name"]}
+        await storage.set_battle(self.channel_id, state)
+
+        view = TurnPlanView(self.channel_id, state["pending_actions"])
+        await interaction.response.edit_message(content=turn_plan_text(state), view=view)
+
+
+class MagicMenuView(discord.ui.View):
+    def __init__(self, channel_id: int, character: str):
+        super().__init__(timeout=120)
+        for spell_key, label in MAGIC_OPTIONS.get(character, []):
+            self.add_item(MagicButton(channel_id, character, spell_key, label))
+        self.add_item(BackButton(channel_id))
+
+
+class MagicButton(discord.ui.Button):
+    def __init__(self, channel_id, character, spell_key, label):
+        super().__init__(label=label, style=discord.ButtonStyle.primary)
+        self.channel_id = channel_id
+        self.character = character
+        self.spell_key = spell_key
+
+    async def callback(self, interaction: discord.Interaction):
+        state = await storage.get_battle(self.channel_id)
+        if not state or state.get("over"):
+            await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
+            return
+
+        state["pending_actions"][self.character] = {"action": "magic", "spell": self.spell_key}
         await storage.set_battle(self.channel_id, state)
 
         view = TurnPlanView(self.channel_id, state["pending_actions"])
@@ -526,6 +589,8 @@ async def resolve_full_party_turn(state: dict, guild_id=None) -> str:
                 texts.append(await resolve_act(state, character, act))
         elif pending["action"] == "item":
             texts.append(await resolve_item(state, character, pending["item_key"]))
+        elif pending["action"] == "magic":
+            texts.append(await resolve_magic(state, character, pending["spell"], guild_id=guild_id))
         else:
             texts.append(await resolve_action(state, character, pending["action"], guild_id=guild_id))
 
@@ -570,33 +635,6 @@ async def resolve_action(state: dict, character: str, action: str, guild_id=None
             return random.choice(enemy["spare_lines"]) + "\n*(Recruited to Castle Town!)*"
         return f"Not yet... {enemy['name']}'s mercy isn't full. Keep using ACT."
 
-    if action == "magic":
-        if character == "ralsei":
-            if state["tp"] >= PACIFY_TP_COST and state["tired"]:
-                state["tp"] -= PACIFY_TP_COST
-                state["over"] = True
-                state["won"] = True
-                if guild_id:
-                    await mark_recruited(guild_id, state["enemy_key"])
-                return f"Ralsei casts Pacify! {random.choice(enemy['tired_lines'])} " + random.choice(enemy["spare_lines"]) + "\n*(Recruited to Castle Town!)*"
-            if state["tp"] >= DUAL_HEAL_TP_COST:
-                state["tp"] -= DUAL_HEAL_TP_COST
-                for c in state["party"].values():
-                    c["hp"] = c["max_hp"]
-                return "Ralsei casts Heal Prayer! The whole party feels better."
-            return "Not enough TP to cast anything useful right now."
-        if character == "susie":
-            dmg = random.randint(20, 35)
-            state["enemy_hp"] = max(0, state["enemy_hp"] - dmg)
-            return f"Susie casts Rude Buster! {enemy['name']} takes {dmg} damage."
-
-    if action == "special":
-        # S-Action / R-Action placeholders — flavor-only for now.
-        if character == "susie":
-            return "Susie does her own thing, refusing to wait for permission. (S-Action — customize per enemy!)"
-        if character == "ralsei":
-            return "Ralsei quietly does something supportive off to the side. (R-Action — customize per enemy!)"
-
     return "...nothing happens."
 
 
@@ -623,6 +661,76 @@ async def resolve_act(state: dict, character: str, act: dict) -> str:
         state["tired"] = True
         text += " " + random.choice(enemy["tired_lines"])
     return text
+
+
+async def resolve_magic(state: dict, character: str, spell_key: str, guild_id=None) -> str:
+    """
+    Resolves a spell chosen from the MAGIC submenu. S-Action/R-Action live
+    here too (per canon), not as separate top-level actions.
+    """
+    enemy = ENEMIES[state["enemy_key"]]
+
+    if spell_key == "heal_prayer":
+        if state["tp"] < HEAL_PRAYER_TP_COST:
+            return "Ralsei tries to cast Heal Prayer, but there isn't enough TP."
+        state["tp"] -= HEAL_PRAYER_TP_COST
+        # Heals whichever party member needs it most, rather than always
+        # the caster — a more useful default given there's no separate
+        # target-picker UI.
+        target_key = min(state["party"], key=lambda k: state["party"][k]["hp"] / max(1, state["party"][k]["max_hp"]))
+        target = state["party"][target_key]
+        before = target["hp"]
+        target["hp"] = target["max_hp"]
+        healed = target["hp"] - before
+        return f"Ralsei casts Heal Prayer! {target_key.capitalize()} recovers {healed} HP."
+
+    if spell_key == "dual_heal":
+        if state["tp"] < DUAL_HEAL_TP_COST:
+            return "Ralsei tries to cast Dual Heal, but there isn't enough TP."
+        state["tp"] -= DUAL_HEAL_TP_COST
+        for c in state["party"].values():
+            c["hp"] = c["max_hp"]
+        return "Ralsei casts Dual Heal! The whole party feels better."
+
+    if spell_key == "pacify":
+        if not state["tired"]:
+            return "Ralsei tries to cast Pacify, but it only works on a TIRED enemy."
+        if state["tp"] < PACIFY_TP_COST:
+            return "Ralsei tries to cast Pacify, but there isn't enough TP."
+        state["tp"] -= PACIFY_TP_COST
+        state["over"] = True
+        state["won"] = True
+        if guild_id:
+            await mark_recruited(guild_id, state["enemy_key"])
+        return f"Ralsei casts Pacify! {random.choice(enemy['tired_lines'])} " + random.choice(enemy["spare_lines"]) + "\n*(Recruited to Castle Town!)*"
+
+    if spell_key == "r_action":
+        # Flavor-only placeholder — customize per enemy if you want a real
+        # per-fight effect, same spirit as canon R-Actions.
+        return "Ralsei quietly does something supportive off to the side. (R-Action — customize per enemy!)"
+
+    if spell_key == "rude_buster":
+        if state["tp"] < RUDE_BUSTER_TP_COST:
+            return "Susie tries to cast Rude Buster, but there isn't enough TP."
+        state["tp"] -= RUDE_BUSTER_TP_COST
+        dmg = random.randint(20, 35)
+        state["enemy_hp"] = max(0, state["enemy_hp"] - dmg)
+        text = f"Susie casts Rude Buster! {enemy['name']} takes {dmg} damage."
+        if state["enemy_hp"] <= 0:
+            state["over"] = True
+            state["won"] = True
+            state["violent"] = True
+            if guild_id:
+                await mark_lost(guild_id, state["enemy_key"])
+            text += f"\n{enemy['name']} is defeated... violently. (This enemy type is now LOST and can't be recruited.)"
+        return text
+
+    if spell_key == "s_action":
+        # Flavor-only placeholder — customize per enemy if you want a real
+        # per-fight effect, same spirit as canon S-Actions.
+        return "Susie does her own thing, refusing to wait for permission. (S-Action — customize per enemy!)"
+
+    return "...nothing happens."
 
 
 async def resolve_item(state: dict, character: str, item_key: str) -> str:
