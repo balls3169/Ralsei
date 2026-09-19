@@ -28,6 +28,7 @@ from discord.ext import commands
 from utils.database_upstash_connection import storage
 from utils.battle_image_renderer import render_battle
 from data.lore_enemies_and_acts import ENEMIES
+from data.lore_items import ITEMS
 from bot_config_and_keys import (
     PACIFY_TP_COST, DUAL_HEAL_TP_COST, TP_GAIN_DEFEND, TP_GAIN_HIT_TAKEN, SHARED_TP_MAX,
     DODGE_TIMEOUT_BASE, DODGE_TIMEOUT_FLOOR, DODGE_TIMEOUT_STEP_PER_TURN,
@@ -73,6 +74,7 @@ def new_battle_state(enemy_key: str) -> dict:
         "flirt_used": {"susie": False, "ralsei": False},
         "pending_actions": {"kris": None, "susie": None, "ralsei": None},
         "turn_number": 0,
+        "inventory": {key: item["starting_count"] for key, item in ITEMS.items()},
         "over": False,
         "won": False,
     }
@@ -83,6 +85,8 @@ def _describe_pending(pending):
         return "choose action"
     if pending["action"] == "act":
         return f"ACT: {pending['act_name']}"
+    if pending["action"] == "item":
+        return f"ITEM: {ITEMS[pending['item_key']]['name']}"
     return pending["action"].upper()
 
 
@@ -169,6 +173,21 @@ class ActionButton(discord.ui.Button):
             await interaction.response.edit_message(content="Choose an ACT for Kris:", view=view)
             return
 
+        if self.action == "item":
+            available = [
+                (key, item) for key, item in ITEMS.items()
+                if state["inventory"].get(key, 0) > 0
+                and (item["restricted_to"] is None or item["restricted_to"] == self.character)
+            ]
+            if not available:
+                await interaction.response.send_message(
+                    f"{self.character.capitalize()} has no items available to use.", ephemeral=True
+                )
+                return
+            view = ItemMenuView(self.channel_id, self.character, available)
+            await interaction.response.edit_message(content=f"Choose an item for {self.character.capitalize()}:", view=view)
+            return
+
         state["pending_actions"][self.character] = {"action": self.action}
         await storage.set_battle(self.channel_id, state)
 
@@ -197,6 +216,34 @@ class ActButton(discord.ui.Button):
             return
 
         state["pending_actions"]["kris"] = {"action": "act", "act_name": self.act["name"]}
+        await storage.set_battle(self.channel_id, state)
+
+        view = TurnPlanView(self.channel_id, state["pending_actions"])
+        await interaction.response.edit_message(content=turn_plan_text(state), view=view)
+
+
+class ItemMenuView(discord.ui.View):
+    def __init__(self, channel_id: int, character: str, available_items: list):
+        super().__init__(timeout=120)
+        for key, item in available_items:
+            self.add_item(ItemButton(channel_id, character, key, item))
+        self.add_item(BackButton(channel_id))
+
+
+class ItemButton(discord.ui.Button):
+    def __init__(self, channel_id, character, item_key, item):
+        super().__init__(label=item["name"], style=discord.ButtonStyle.success)
+        self.channel_id = channel_id
+        self.character = character
+        self.item_key = item_key
+
+    async def callback(self, interaction: discord.Interaction):
+        state = await storage.get_battle(self.channel_id)
+        if not state or state.get("over"):
+            await interaction.response.send_message("There's no battle happening right now!", ephemeral=True)
+            return
+
+        state["pending_actions"][self.character] = {"action": "item", "item_key": self.item_key}
         await storage.set_battle(self.channel_id, state)
 
         view = TurnPlanView(self.channel_id, state["pending_actions"])
@@ -477,6 +524,8 @@ async def resolve_full_party_turn(state: dict, guild_id=None) -> str:
             act = next((a for a in enemy["acts"] if a["name"] == pending["act_name"]), None)
             if act:
                 texts.append(await resolve_act(state, character, act))
+        elif pending["action"] == "item":
+            texts.append(await resolve_item(state, character, pending["item_key"]))
         else:
             texts.append(await resolve_action(state, character, pending["action"], guild_id=guild_id))
 
@@ -520,9 +569,6 @@ async def resolve_action(state: dict, character: str, action: str, guild_id=None
                 await mark_recruited(guild_id, state["enemy_key"])
             return random.choice(enemy["spare_lines"]) + "\n*(Recruited to Castle Town!)*"
         return f"Not yet... {enemy['name']}'s mercy isn't full. Keep using ACT."
-
-    if action == "item":
-        return "*(Item system not implemented yet — plug in your item logic here.)*"
 
     if action == "magic":
         if character == "ralsei":
@@ -577,6 +623,45 @@ async def resolve_act(state: dict, character: str, act: dict) -> str:
         state["tired"] = True
         text += " " + random.choice(enemy["tired_lines"])
     return text
+
+
+async def resolve_item(state: dict, character: str, item_key: str) -> str:
+    """
+    Applies a consumable item's effect. Character-restricted items (e.g.
+    Choco Diamond is Kris-only) are already filtered out at the menu level
+    (ItemMenuView), so this function assumes the pick was valid — it only
+    re-checks the count, since two queued actions in the same turn could
+    both target the last copy of something (Kris uses the last Butterscotch
+    Pie, then Susie's queued pick for the same item should fail gracefully
+    rather than going negative or crashing).
+    """
+    item = ITEMS[item_key]
+    count = state["inventory"].get(item_key, 0)
+
+    if count <= 0:
+        return f"{character.capitalize()} reaches for the {item['name']}, but there's none left!"
+
+    if item["target"] == "revive":
+        downed = [k for k, v in state["party"].items() if v["hp"] <= 0]
+        if not downed:
+            # Don't consume the item if there's no one to revive — avoids
+            # wasting a valuable item on a misclick.
+            return f"{character.capitalize()} considers using the {item['name']}, but no one needs reviving right now."
+        state["inventory"][item_key] -= 1
+        target = downed[0]
+        state["party"][target]["hp"] = state["party"][target]["max_hp"]
+        return f"{character.capitalize()} {item['flavor_use']}! {target.capitalize()} is revived, fully healed!"
+
+    # target == "self"
+    state["inventory"][item_key] -= 1
+    char_stats = state["party"][character]
+    before_hp = char_stats["hp"]
+    if item["heal_amount"] is None:
+        char_stats["hp"] = char_stats["max_hp"]
+    else:
+        char_stats["hp"] = min(char_stats["max_hp"], char_stats["hp"] + item["heal_amount"])
+    healed = char_stats["hp"] - before_hp
+    return f"{character.capitalize()} {item['flavor_use']}! Recovers {healed} HP."
 
 
 class Battle(commands.Cog):
